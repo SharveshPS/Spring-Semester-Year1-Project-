@@ -1,0 +1,358 @@
+import cv2
+import numpy as np
+from picamera.array import PiRGBArray
+from picamera import PiCamera
+import RPi.GPIO as GPIO
+import time
+
+# Initialize GPIO for motor control
+# Define GPIO pins for motor control
+IN1 = 24
+IN2 = 18
+IN3 = 17
+IN4 = 27
+ENA = 25
+ENB = 22
+
+# Set up GPIO mode and pins
+GPIO.setmode(GPIO.BCM)
+GPIO.setup(IN1, GPIO.OUT)
+GPIO.setup(IN2, GPIO.OUT)
+GPIO.setup(IN3, GPIO.OUT)
+GPIO.setup(IN4, GPIO.OUT)
+GPIO.setup(ENA, GPIO.OUT)
+GPIO.setup(ENB, GPIO.OUT)
+
+# Initialize PWM for motor control
+pwm_motor1 = GPIO.PWM(ENA, 100)  # Frequency: 100 Hz
+pwm_motor2 = GPIO.PWM(ENB, 100)
+pwm_motor1.start(0)
+pwm_motor2.start(0)
+
+# Define motor control functions
+def move_forward(speed):
+    GPIO.output(IN1, GPIO.HIGH)
+    GPIO.output(IN2, GPIO.LOW)
+    GPIO.output(IN3, GPIO.HIGH)
+    GPIO.output(IN4, GPIO.LOW)
+    pwm_motor1.ChangeDutyCycle(speed)
+    pwm_motor2.ChangeDutyCycle(speed)
+
+def turn_left(speed):
+    GPIO.output(IN1, GPIO.HIGH)
+    GPIO.output(IN2, GPIO.LOW)
+    GPIO.output(IN3, GPIO.LOW)
+    GPIO.output(IN4, GPIO.HIGH)
+    pwm_motor1.ChangeDutyCycle(50)
+    pwm_motor2.ChangeDutyCycle(30)
+
+def turn_right(speed):
+    GPIO.output(IN1, GPIO.LOW)
+    GPIO.output(IN2, GPIO.HIGH)
+    GPIO.output(IN3, GPIO.HIGH)
+    GPIO.output(IN4, GPIO.LOW)
+    pwm_motor1.ChangeDutyCycle(30)
+    pwm_motor2.ChangeDutyCycle(50)
+
+def stop():
+    GPIO.output(IN1, GPIO.LOW)
+    GPIO.output(IN2, GPIO.LOW)
+    GPIO.output(IN3, GPIO.LOW)
+    GPIO.output(IN4, GPIO.LOW)
+    pwm_motor1.ChangeDutyCycle(0)
+    pwm_motor2.ChangeDutyCycle(0)
+
+# Flags to keep track of color detection
+red_detected = False
+blue_detected = False
+green_detected = False
+yellow_detected = False
+
+arrow_mode = False
+shape_mode = False
+
+# Global variable to store detected contours
+detected_contours = []
+
+# Function to detect black lines in a binary filtered image and adjust robot's movement
+def detect_and_follow_black_line(binary_image, original_image):
+    # Find contours
+    contours, _ = cv2.findContours(binary_image, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    
+    # If contours are found
+    if contours:
+        # Get the largest contour
+        c = max(contours, key=cv2.contourArea)
+        
+        # Get centroid of the largest contour
+        M = cv2.moments(c)
+        if M["m00"] != 0:
+            cx = int(M['m10'] / M['m00'])
+            cy = int(M['m01'] / M['m00'])
+            
+            # Adjust robot's movement based on the centroid
+            if cx > 180 and cx < 320:  # Adjust this threshold for turning left
+                turn_left(100)
+            elif cx > 0 and cx<140:  # Adjust this threshold for turning right
+                turn_right(100)
+            else:
+                move_forward(25)
+
+        
+# Function to detect and follow color line
+def detect_and_follow_color_line(frame):
+    global red_detected, blue_detected, green_detected, yellow_detected, detected_contours
+
+    # Convert the BGR image to HSV
+    hsv_image = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
+    
+    # Define HSV thresholds for each color
+    lower_red = np.array([160, 100, 50])  # Adjusted threshold for red
+    upper_red = np.array([180, 255, 255])  # Adjusted threshold for red
+
+    lower_blue = np.array([100, 100, 0])  # Adjusted threshold for blue
+    upper_blue = np.array([140, 255, 255])  # Adjusted threshold for blue
+
+    lower_green = np.array([36, 255, 50])  # Adjusted threshold for green
+    upper_green = np.array([86, 255, 255])  # Adjusted threshold for green
+    
+    lower_yellow = np.array([31, 100, 100])  # Adjusted threshold for yellow
+    upper_yellow = np.array([45, 255, 255])  # Adjusted threshold for yellow
+
+    # Create masks for each color
+    mask_red = cv2.inRange(hsv_image, lower_red, upper_red)
+    mask_blue = cv2.inRange(hsv_image, lower_blue, upper_blue)
+    mask_green = cv2.inRange(hsv_image, lower_green, upper_green)
+    mask_yellow = cv2.inRange(hsv_image, lower_yellow, upper_yellow)
+
+    # Find contours for color mask
+    contours_red, _ = cv2.findContours(mask_red, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    contours_blue, _ = cv2.findContours(mask_blue, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    contours_green, _ = cv2.findContours(mask_green, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    contours_yellow, _ = cv2.findContours(mask_yellow, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+
+    # Update detected contours
+    detected_contours = [(contours_red, (0, 0, 255)),  # Red
+                         (contours_blue, (255, 0, 0)),  # Blue
+                         (contours_green, (0, 255, 0)),  # Green
+                         (contours_yellow, (0, 255, 255))]  # Yellow
+
+    # Reset color detection flags
+    red_detected = False
+    blue_detected = False
+    green_detected = False
+    yellow_detected = False
+
+    # Check for red color
+    if contours_red:
+        red_detected = True
+    
+    # Check for blue color
+    if contours_blue:
+        blue_detected = True
+    
+    # Check for green color
+    if contours_green:
+        green_detected = True
+    
+    # Check for yellow color
+    if contours_yellow:
+        yellow_detected = True
+
+def follow_contour(frame, color_contours):
+    for contours, color in color_contours:
+        if contours:
+            # Find the largest contour
+            c = max(contours, key=cv2.contourArea)
+            
+            # Get centroid of the largest contour
+            M = cv2.moments(c)
+            if M["m00"] != 0:
+                cx = int(M['m10'] / M['m00'])
+                cy = int(M['m01'] / M['m00'])
+
+                # Adjust robot's movement based on the centroid
+                if cx > 17 and cx < 70:  # Adjust this threshold for turning right
+                    turn_right(100)
+                elif cx < 280 and cx > 165:  # Adjust this threshold for turning left
+                    turn_left(100)
+                else:
+                    move_forward(35)
+                    
+def detect_shapes(gray_frame):
+    shape_mode = False
+    """ Detect shapes using contours and return the contours found """
+    # Setting threshold of gray image
+    _, threshold = cv2.threshold(gray_frame, 55, 255, cv2.THRESH_BINARY)
+    
+    # Using findContours() function
+    contours, _ = cv2.findContours(threshold, cv2.RETR_TREE, cv2.CHAIN_APPROX_SIMPLE)
+    
+    detected_shapes = []
+    for contour in contours:
+        # Calculate contour area and bounding box
+        area = cv2.contourArea(contour)
+        x, y, w, h = cv2.boundingRect(contour)
+        
+        # Ignore contours that are too small or too large
+        if area < 350 or area > gray_frame.shape[0] * gray_frame.shape[1] / 2:
+            continue
+        
+        # Calculate aspect ratio
+        aspect_ratio = float(w) / h
+        
+        # Ignore contours with aspect ratio indicating they are likely words
+        if aspect_ratio > 3:  # Adjust threshold as needed
+            continue
+        
+        # Approximate the shape
+        approx = cv2.approxPolyDP(contour, 0.01 * cv2.arcLength(contour, True), True)
+        
+        # Calculate circularity
+        perimeter = cv2.arcLength(contour, True)
+        circularity = 4 * np.pi * area / (perimeter * perimeter)
+        
+        # Find center point of shape
+        M = cv2.moments(contour)
+        if M['m00'] != 0.0:
+            x = int(M['m10'] / M['m00'])
+            y = int(M['m01'] / M['m00'])
+            
+            # Put shape name at center of each shape
+            if len(approx) == 3:
+                shape_mode = True
+                shape = "Triangle"
+                detected_shapes.append((shape, contour, (x, y)))
+            elif len(approx) == 4:
+                shape_mode = True
+                shape = "Quadrilateral"
+                detected_shapes.append((shape, contour, (x, y)))
+            elif len(approx) == 5:
+                shape_mode = True
+                shape = "Pentagon"
+                detected_shapes.append((shape, contour, (x, y)))
+            elif len(approx) == 6:
+                shape_mode = True
+                shape = "Hexagon"
+                detected_shapes.append((shape, contour, (x, y)))
+            elif circularity < 0.8:  # Adjust circularity threshold as needed
+                shape_mode = True
+                shape = "Partial Circle"
+                detected_shapes.append((shape, contour, (x, y)))
+            else:
+                shape_mode = False
+    
+    return shape_mode, detected_shapes
+
+def detect_arrows(gray_frame):
+    arrow_mode = False
+    """ Detect arrows using contours and return the arrow tips """
+    # Preprocess the frame
+    _, binary_img = cv2.threshold(gray_frame, 120, 255, cv2.THRESH_BINARY)  # Adjust threshold value as needed
+    
+    # Apply morphological operations
+    kernel = np.ones((0, 0))
+    img_dilate = cv2.dilate(binary_img, kernel, iterations=2)
+    img_erode = cv2.erode(img_dilate, kernel, iterations=1)
+
+    contours, _ = cv2.findContours(img_erode, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_NONE)
+
+    detected_arrows = []
+    for cnt in contours:
+        peri = cv2.arcLength(cnt, True)
+        approx = cv2.approxPolyDP(cnt, 0.025 * peri, True)
+        hull = cv2.convexHull(approx, returnPoints=False)
+        sides = len(hull)
+
+        if 6 > sides > 3 and sides + 2 == len(approx):
+            # Find arrow tips using convex hull
+            arrow_tip = find_tip(approx[:, 0, :], hull.squeeze())
+            if arrow_tip:
+                arrow_mode = True
+                detected_arrows.append((arrow_tip, cv2.moments(cnt)))
+            else:
+                arrow_mode = False
+
+    return arrow_mode, detected_arrows
+
+def find_tip(points, convex_hull):
+    length = len(points)
+    indices = np.setdiff1d(range(length), convex_hull)
+
+    for i in range(2):
+        j = indices[i] + 2
+        if j > length - 1:
+            j = length - j
+        if np.all(points[j] == points[indices[i - 1] - 2]):
+            return tuple(points[j])                
+   
+# Main function
+def main():
+    # Initialize the camera
+    camera = PiCamera()
+    camera.resolution = (320, 240)
+    camera.framerate = 20
+    rawCapture = PiRGBArray(camera, size=(320, 240))
+    
+    # Allow the camera to warm up
+    time.sleep(0.1)
+
+    for frame in camera.capture_continuous(rawCapture, format="bgr", use_video_port=True):
+        # Grab the raw NumPy array representing the image
+        original_image = frame.array.copy()
+
+        # Detect and follow color lines
+        detect_and_follow_color_line(original_image)
+        
+        # Convert the original image to grayscale
+        gray_image = cv2.cvtColor(original_image, cv2.COLOR_BGR2GRAY)
+
+        # Thresholding to create binary image with white lines on black background
+        _, binary_image = cv2.threshold(gray_image, 55, 255, cv2.THRESH_BINARY)
+        
+        shape_mode, detected_shapes = detect_shapes(gray_image)
+        arrow_mode, detected_arrows = detect_arrows(gray_image)
+        
+        if arrow_mode:
+            print("Arrow Detected")
+        if shape_mode:
+            print("Shape Detected")
+
+        # Check if any of the colors are detected
+        if red_detected or green_detected:
+            # Follow detected color contours
+            follow_contour(original_image, detected_contours)
+
+            # Draw contours of detected colors on the original image
+            for contours, color in detected_contours:
+                cv2.drawContours(original_image, contours, -1, color, 2)
+
+        else:
+            # Invert the binary image
+            inverted_binary_image = cv2.bitwise_not(binary_image)
+            
+            # Follow black line
+            detect_and_follow_black_line(inverted_binary_image, original_image)
+
+            # Display the binary image
+            cv2.imshow("Binary Image", inverted_binary_image)
+
+        # Display the original image
+        cv2.imshow("Original Image", original_image)
+        
+        # Clear the stream in preparation for the next frame
+        rawCapture.truncate(0)
+
+        # Check for 'q' key press to exit
+        if cv2.waitKey(1) & 0xFF == ord('q'):
+            break
+
+    # Release the camera resources
+    cv2.destroyAllWindows()
+    camera.close()
+
+    # Stop the motors when program ends
+    stop()
+
+if __name__ == "__main__":
+    main()
