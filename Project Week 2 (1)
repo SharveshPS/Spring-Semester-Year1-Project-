@@ -1,0 +1,204 @@
+import cv2
+import numpy as np
+import time
+
+CAMERA_DEVICE_ID = 0
+IMAGE_WIDTH = 320
+IMAGE_HEIGHT = 240
+
+def set_camera_properties(cap, width, height):
+    """ Set resolution properties for the camera """
+    cap.set(cv2.CAP_PROP_FRAME_WIDTH, width)
+    cap.set(cv2.CAP_PROP_FRAME_HEIGHT, height)
+
+def capture_frame(cap):
+    """ Capture a frame from the video source """
+    ret, frame = cap.read()
+    if not ret:
+        raise ValueError("Failed to read a frame from the camera")
+    return frame
+
+def detect_shapes(gray_frame):
+    """ Detect shapes using contours and return the contours found """
+    # Setting threshold of gray image
+    _, threshold = cv2.threshold(gray_frame, 85, 255, cv2.THRESH_BINARY)
+    
+    # Using findContours() function
+    contours, _ = cv2.findContours(threshold, cv2.RETR_TREE, cv2.CHAIN_APPROX_SIMPLE)
+    
+    detected_shapes = []
+    for contour in contours:
+        # Calculate contour area and bounding box
+        area = cv2.contourArea(contour)
+        x, y, w, h = cv2.boundingRect(contour)
+        
+        # Ignore contours that are too small or too large
+        if area < 350 or area > gray_frame.shape[0] * gray_frame.shape[1] / 2:
+            continue
+        
+        # Calculate aspect ratio
+        aspect_ratio = float(w) / h
+        
+        # Ignore contours with aspect ratio indicating they are likely words
+        if aspect_ratio > 3:  # Adjust threshold as needed
+            continue
+        
+        # Approximate the shape
+        approx = cv2.approxPolyDP(contour, 0.01 * cv2.arcLength(contour, True), True)
+        
+        # Calculate circularity
+        perimeter = cv2.arcLength(contour, True)
+        circularity = 4 * np.pi * area / (perimeter * perimeter)
+        
+        # Find center point of shape
+        M = cv2.moments(contour)
+        if M['m00'] != 0.0:
+            x = int(M['m10'] / M['m00'])
+            y = int(M['m01'] / M['m00'])
+            
+            # Put shape name at center of each shape
+            if len(approx) == 3:
+                shape = "Triangle"
+                detected_shapes.append((shape, contour, (x, y)))
+            elif len(approx) == 4:
+                shape = "Quadrilateral"
+                detected_shapes.append((shape, contour, (x, y)))
+            elif len(approx) == 5:
+                shape = "Pentagon"
+                detected_shapes.append((shape, contour, (x, y)))
+            elif len(approx) == 6:
+                shape = "Hexagon"
+                detected_shapes.append((shape, contour, (x, y)))
+            elif circularity < 0.8:  # Adjust circularity threshold as needed
+                    shape = "Partial Circle"
+                    detected_shapes.append((shape, contour, (x, y)))
+            else:
+                shape = "Circle"
+                detected_shapes.append((shape, contour, (x, y)))
+    
+    return detected_shapes
+
+def detect_arrows(gray_frame):
+    """ Detect arrows using contours and return the arrow tips """
+    # Preprocess the frame
+    _, binary_img = cv2.threshold(gray_frame, 120, 255, cv2.THRESH_BINARY)  # Adjust threshold value as needed
+    kernel = np.ones((3, 3))
+    img_dilate = cv2.dilate(binary_img, kernel, iterations=2)
+    img_erode = cv2.erode(img_dilate, kernel, iterations=1)
+
+    contours, _ = cv2.findContours(img_erode, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_NONE)
+
+    detected_arrows = []
+    for cnt in contours:
+        peri = cv2.arcLength(cnt, True)
+        approx = cv2.approxPolyDP(cnt, 0.025 * peri, True)
+        hull = cv2.convexHull(approx, returnPoints=False)
+        sides = len(hull)
+
+        if 6 > sides > 3 and sides + 2 == len(approx):
+            arrow_tip = find_tip(approx[:, 0, :], hull.squeeze())
+            if arrow_tip:
+                detected_arrows.append((arrow_tip, cv2.moments(cnt)))
+
+    return detected_arrows
+
+def find_tip(points, convex_hull):
+    length = len(points)
+    indices = np.setdiff1d(range(length), convex_hull)
+
+    for i in range(2):
+        j = indices[i] + 2
+        if j > length - 1:
+            j = length - j
+        if np.all(points[j] == points[indices[i - 1] - 2]):
+            return tuple(points[j])
+
+def visualize_fps(image, fps: float) -> np.ndarray:
+    """Overlay the FPS value onto the given image."""
+    if len(np.shape(image)) < 3:
+        text_color = (255, 255, 255)  # white
+    else:
+        text_color = (0, 255, 0)  # green
+    
+    row_size = 20  # pixels
+    left_margin = 24  # pixels
+    font_size = 1
+    font_thickness = 1
+    
+    fps_text = 'FPS: {:.1f}'.format(fps)
+    text_location = (left_margin, row_size)
+    cv2.putText(image, fps_text, text_location, cv2.FONT_HERSHEY_PLAIN,
+                font_size, text_color, font_thickness)
+ 
+    return image
+
+def main():
+    try:
+        cap = cv2.VideoCapture(CAMERA_DEVICE_ID)
+        if not cap.isOpened():
+            raise ValueError("Could not open the camera")
+        set_camera_properties(cap, IMAGE_WIDTH, IMAGE_HEIGHT)
+
+        print("Press 's' to switch between modes. Press 'Esc' to exit...")
+
+        fps = 0  # Initialize the fps variable
+        shape_mode = True  # Start with shape detection mode
+
+        while True:
+            start_time = time.time()
+
+            frame = capture_frame(cap)
+            gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+
+            if shape_mode:
+                detected_objects = detect_shapes(gray)
+                output = cv2.cvtColor(gray, cv2.COLOR_GRAY2BGR)
+
+                # Draw detected shapes on the frame
+                for shape, contour, (x, y) in detected_objects:
+                    cv2.drawContours(output, [contour], 0, (0, 0, 255), 3)
+                    cv2.putText(output, shape, (x, y), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2)
+
+            else:
+                detected_arrows = detect_arrows(gray)
+                output = cv2.cvtColor(gray, cv2.COLOR_GRAY2BGR)
+
+                # Draw detected arrows on the frame
+                for arrow_tip, M in detected_arrows:
+                    cx = int(M["m10"] / M["m00"])
+                    cy = int(M["m01"] / M["m00"])
+                    cv2.circle(output, arrow_tip, 3, (0, 0, 255), cv2.FILLED)
+                    cv2.line(output, (cx, cy), arrow_tip, (255, 0, 0), 2)
+                    direction_vector = np.array(arrow_tip) - np.array([cx, cy])
+                    angle = np.degrees(np.arctan2(direction_vector[1], direction_vector[0]))
+                    if -45 <= angle <= 45:
+                        cv2.putText(output, 'right', tuple(arrow_tip), cv2.FONT_HERSHEY_SIMPLEX, 1, (255, 0, 0), 2, cv2.LINE_AA)
+                    elif 45 < angle <= 135:
+                        cv2.putText(output, 'down', tuple(arrow_tip), cv2.FONT_HERSHEY_SIMPLEX, 1, (255, 0, 0), 2, cv2.LINE_AA)
+                    elif -135 <= angle < -45:
+                        cv2.putText(output, 'up', tuple(arrow_tip), cv2.FONT_HERSHEY_SIMPLEX, 1, (255, 0, 0), 2, cv2.LINE_AA)
+                    else:
+                        cv2.putText(output, 'left', tuple(arrow_tip), cv2.FONT_HERSHEY_SIMPLEX, 1, (255, 0, 0), 2, cv2.LINE_AA)
+
+            end_time = time.time()
+            seconds = end_time - start_time
+            fps = 1.0 / seconds
+
+            # Overlay FPS and display frames
+            cv2.imshow("Frame", visualize_fps(output, fps))
+
+            key = cv2.waitKey(1)
+            if key == 27:  # Escape key
+                break
+            elif key == ord('s'):
+                shape_mode = not shape_mode  # Switch between shape detection and arrow detection
+
+    except Exception as e:
+        print(e)
+
+    finally:
+        cv2.destroyAllWindows()
+        cap.release()
+
+if __name__ == "__main__":
+    main()
